@@ -1,4 +1,4 @@
-# Kubernetes Multicast Relay Sidecar
+# OpenShift Multicast Relay Sidecar
 
 A portable sidecar pattern that enables IP multicast between pods running on separate nodes in AWS, without requiring changes to the application container image or cluster-level CNI configuration.
 
