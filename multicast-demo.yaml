@@ -1,0 +1,136 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: multicast-sa
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: multicast-relay-script
+data:
+  relay.py: |
+    import socket, struct, threading, os
+
+    GROUP           = os.environ.get("MULTICAST_GROUP", "225.1.2.3")
+    PORT            = int(os.environ.get("MULTICAST_PORT", "1234"))
+    SVC_NAME        = os.environ.get("PEER_SERVICE_NAME", "multicast-peers")
+    POD_NAMESPACE   = os.environ.get("POD_NAMESPACE", "default")
+    MY_IP           = os.environ.get("POD_IP", "")
+    RELAY_PORT      = int(os.environ.get("RELAY_PORT", "14446"))
+    INJECT_SRC_PORT = RELAY_PORT + 1
+
+    PEERS_SVC = f"{SVC_NAME}.{POD_NAMESPACE}.svc.cluster.local"
+
+    def get_peers():
+        try:
+            _, _, ips = socket.gethostbyname_ex(PEERS_SVC)
+            return [ip for ip in ips if ip != MY_IP]
+        except Exception as e:
+            print(f"relay: peer lookup failed: {e}", flush=True)
+            return []
+
+    def mcast_to_unicast():
+        """Receive multicast from local app, forward to every peer as unicast."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("", PORT))
+        mreq = struct.pack("4s4s", socket.inet_aton(GROUP), socket.inet_aton(MY_IP))
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+        fwd = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        print(f"relay: listening for multicast on {GROUP}:{PORT}", flush=True)
+        while True:
+            try:
+                data, (src_ip, src_port) = sock.recvfrom(65535)
+                if src_port == INJECT_SRC_PORT or src_ip != MY_IP:
+                    continue
+                peers = get_peers()
+                for peer in peers:
+                    fwd.sendto(data, (peer, RELAY_PORT))
+                if peers:
+                    print(f"relay: forwarded {len(data)}b to {peers}", flush=True)
+            except Exception as e:
+                print(f"relay mcast_to_unicast error: {e}", flush=True)
+
+    def unicast_to_mcast():
+        """Receive unicast from peer relays, re-inject as multicast locally."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("", RELAY_PORT))
+        inj = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+        inj.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+        inj.bind(("", INJECT_SRC_PORT))
+        print(f"relay: listening for unicast on :{RELAY_PORT}", flush=True)
+        while True:
+            try:
+                data, (src_ip, _) = sock.recvfrom(65535)
+                inj.sendto(data, (GROUP, PORT))
+                print(f"relay: injected {len(data)}b from {src_ip} into {GROUP}:{PORT}", flush=True)
+            except Exception as e:
+                print(f"relay unicast_to_mcast error: {e}", flush=True)
+
+    threading.Thread(target=mcast_to_unicast, daemon=True).start()
+    unicast_to_mcast()
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: multicast-peers
+spec:
+  clusterIP: None
+  selector:
+    app: multicast-demo
+  ports:
+  - name: app
+    port: 1234
+    protocol: UDP
+  - name: relay
+    port: 14446
+    protocol: UDP
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: multicast-demo
+spec:
+  serviceName: multicast-peers
+  replicas: 3
+  selector:
+    matchLabels:
+      app: multicast-demo
+  template:
+    metadata:
+      labels:
+        app: multicast-demo
+    spec:
+      serviceAccountName: multicast-sa
+      containers:
+      - name: app
+        image: mjelen/demo-multicast
+
+      - name: multicast-relay
+        image: python:3.11-slim
+        command: ["python3", "/scripts/relay.py"]
+        env:
+        - name: MULTICAST_GROUP
+          value: "225.1.2.3"
+        - name: MULTICAST_PORT
+          value: "1234"
+        - name: RELAY_PORT
+          value: "14446"
+        - name: PEER_SERVICE_NAME
+          value: "multicast-peers"
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        volumeMounts:
+        - name: relay-script
+          mountPath: /scripts
+      volumes:
+      - name: relay-script
+        configMap:
+          name: multicast-relay-script
