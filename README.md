@@ -93,7 +93,23 @@ git clone <this-repo>
 cd <this-repo>
 ```
 
-### 2. Deploy to a namespace
+### 2. Create and annotate the namespace
+
+Create the namespace and enable OVN-Kubernetes multicast on it. The annotation is required for OVN to permit multicast traffic within the namespace, including the local same-node traffic the relay depends on.
+
+```bash
+oc new-project <your-namespace>
+oc annotate namespace <your-namespace> k8s.ovn.org/multicast-enabled=true
+```
+
+Verify the annotation was applied:
+
+```bash
+oc get namespace <your-namespace> -o jsonpath='{.metadata.annotations.k8s\.ovn\.org/multicast-enabled}'
+# expected output: true
+```
+
+### 3. Deploy to the namespace
 
 ```bash
 oc apply -f multicast-demo.yaml -n <your-namespace>
@@ -101,7 +117,7 @@ oc apply -f multicast-demo.yaml -n <your-namespace>
 
 No other configuration is needed. The relay discovers its own namespace at runtime via the Kubernetes Downward API.
 
-### 3. Verify peer discovery
+### 4. Verify peer discovery
 
 ```bash
 # Wait for all pods to reach 2/2 Running
@@ -119,7 +135,7 @@ Expected output (one line per pod):
 [pod/multicast-demo-2] Known peers alive are: multicast-demo-0, multicast-demo-1
 ```
 
-### 4. Verify relay activity
+### 5. Verify relay activity
 
 ```bash
 oc logs -l app=multicast-demo -c multicast-relay -n <your-namespace> --prefix | tail -20
@@ -132,7 +148,7 @@ Expected output:
 [pod/multicast-demo-1] relay: injected 16b from 10.130.0.x into 225.1.2.3:1234
 ```
 
-### 5. Confirm cross-node placement
+### 6. Confirm cross-node placement
 
 ```bash
 oc get pods -n <your-namespace> -o wide
@@ -147,7 +163,12 @@ If all pods land on the same node by chance, delete one and let it reschedule un
 Because namespace is never hardcoded in the YAML, the same file deploys cleanly to any namespace:
 
 ```bash
+oc new-project team-a
+oc annotate namespace team-a k8s.ovn.org/multicast-enabled=true
 oc apply -f multicast-demo.yaml -n team-a
+
+oc new-project team-b
+oc annotate namespace team-b k8s.ovn.org/multicast-enabled=true
 oc apply -f multicast-demo.yaml -n team-b
 ```
 
@@ -289,3 +310,9 @@ affinity:
             app: multicast-demo
         topologyKey: kubernetes.io/hostname
 ```
+
+---
+
+## References
+
+- [Enabling multicast for a project — OpenShift Container Platform 4.20 OVN-Kubernetes Network Plugin](https://docs.redhat.com/en/documentation/openshift_container_platform/4.20/html/ovn-kubernetes_network_plugin/nw-ovn-kubernetes-enabling-multicast)
